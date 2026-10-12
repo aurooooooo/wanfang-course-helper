@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         万方课程后台播放、倍速与自动下一节
 // @namespace    local.wanfang.background
-// @version      1.4.1
+// @version      1.5.0
 // @author       aurooooooo
 // @license      MIT
 // @homepageURL  https://github.com/aurooooooo/wanfang-course-helper
@@ -51,27 +51,41 @@
   const panel = host.attachShadow({ mode: 'open' });
   panel.innerHTML = `
     <style>
-      :host{font:13px/1.5 system-ui,sans-serif;color:#20302c}
+      :host{font:13px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;color:#17251f;color-scheme:light}
       *{box-sizing:border-box}
-      section{width:300px;max-width:calc(100vw - 32px);padding:14px;background:#fff;border:1px solid #cbd9d2;border-radius:12px;box-shadow:0 4px 22px #0002}
-      header{display:flex;justify-content:space-between;align-items:center;gap:8px;cursor:move;touch-action:none;user-select:none}
-      header:focus-visible{outline:2px solid #16724e;outline-offset:4px;border-radius:4px}
-      strong{font-size:14px}#status{color:#16724e;font-size:12px}#status[data-stopped]{color:#8b571a}
-      #detail{margin:9px 0;color:#53645c;overflow-wrap:anywhere;white-space:pre-line}
-      .controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-      select,button{font:inherit;min-height:32px;border:1px solid #cbd9d2;border-radius:6px;background:#fff;color:#20302c;padding:4px 8px}
-      select:focus-visible,button:focus-visible,summary:focus-visible{outline:2px solid #16724e;outline-offset:2px}
-      button{margin-left:auto;cursor:pointer}button:disabled{cursor:default;opacity:.5}
-      details{margin-top:12px;border-top:1px solid #e5ebe7;padding-top:9px}summary{cursor:pointer;color:#16724e}
-      pre{max-height:190px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:11px/1.6 ui-monospace,monospace;background:#f4f7f5;padding:8px;border-radius:6px;margin:8px 0 0}
-      .setting{display:flex;align-items:center;gap:6px;margin-top:8px;cursor:pointer}.hint{font-size:12px;color:#53645c;margin:5px 0 0}
+      section{width:300px;max-width:calc(100vw - 32px);max-height:calc(100dvh - 32px);overflow:auto;background:#fff;border:1px solid #d5dfd9;border-radius:14px;box-shadow:0 8px 30px #17251f26}
+      header{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:15px 16px;border-bottom:1px solid #e3e9e5;cursor:move;touch-action:none;user-select:none}
+      strong{font-size:15px;letter-spacing:.02em}
+      #status{color:#146347;background:#e8f4ed;border:1px solid #c9e5d4;border-radius:20px;padding:3px 8px;font-size:11px;font-weight:600;white-space:nowrap}
+      #status[data-stopped]{color:#76531c;background:#fcf3df;border-color:#ecd8ae}
+      .body{padding:15px 16px 16px}.caption{font-size:11px;color:#52635a;margin:0 0 5px}
+      #chapter{font-size:14px;font-weight:600;line-height:1.6;margin:0;overflow-wrap:anywhere;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden}
+      .metrics{display:flex;align-items:end;justify-content:space-between;gap:10px;margin:16px 0 7px}
+      #progress-text{font-size:28px;font-weight:650;line-height:1.1;letter-spacing:-.03em;font-variant-numeric:tabular-nums}
+      #detail{color:#43574c;font-size:12px;margin:0;text-align:right}
+      progress{display:block;appearance:none;width:100%;height:5px;border:0;border-radius:8px;overflow:hidden;background:#e6ece8;accent-color:#146347}
+      progress::-webkit-progress-bar{background:#e6ece8}progress::-webkit-progress-value{background:#146347}progress::-moz-progress-bar{background:#146347}
+      .controls{display:grid;grid-template-columns:80px 1fr;gap:12px;margin-top:17px}
+      .control-label{display:block;color:#43574c;font-size:11px;margin-bottom:5px}
+      select,button{width:100%;font:inherit;min-height:36px;border:1px solid #bbc9c0;border-radius:7px;background:#fff;color:#17251f;padding:6px 9px}
+      button{cursor:pointer;background:#146347;color:#fff;border-color:#146347;font-size:12px;font-weight:600}
+      button:hover{background:#0e5139}button[data-off]{background:#fff;color:#146347;border-color:#93b5a1}button[data-off]:hover{background:#edf5f0}
+      header:focus-visible,select:focus-visible,button:focus-visible,summary:focus-visible,input:focus-visible{outline:2px solid #146347;outline-offset:3px}
+      details{border-top:1px solid #e3e9e5;padding:10px 16px}summary{cursor:pointer;color:#34483d;font-size:12px;font-weight:600}
+      pre{max-height:160px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:11px/1.7 ui-monospace,monospace;color:#243c2e;background:#f1f5f2;padding:10px;border-radius:7px;margin:10px 0 0}
+      .setting{display:flex;justify-content:space-between;align-items:center;gap:12px;margin:12px 0 0;cursor:pointer}.setting input{width:17px;height:17px;margin:0;accent-color:#146347;cursor:pointer}
+      .hint{font-size:11px;color:#52635a;margin:7px 0 2px;line-height:1.6}
     </style>
     <section aria-label="课程脚本控制面板">
-      <header id="drag-handle" tabindex="0" role="button" aria-label="移动课程助手面板，可拖动或用方向键移动" title="拖动标题栏移动；聚焦后可用方向键移动"><strong>课程助手</strong><span id="status" role="status">● 运行中</span></header>
-      <p id="detail">等待课程播放器，进入视频课程后自动处理…</p>
-      <div class="controls"><label for="speed">倍速</label><select id="speed"></select><button id="stop" type="button">停止自动切换</button></div>
-      <details><summary>设置</summary><label class="setting"><input id="auto-play" type="checkbox">暂停时自动播放</label><p class="hint">默认开启；关闭后保留暂停状态。浏览器可能要求先手动播放一次。</p></details>
-      <details><summary id="log-label">运行日志（0）</summary><pre id="logs" aria-label="脚本运行日志"></pre></details>
+      <header id="drag-handle" tabindex="0" role="button" aria-label="移动课程助手面板，可拖动或用方向键移动" title="拖动移动 · 方向键微调"><strong>课程助手</strong><span id="status" role="status">● 运行中</span></header>
+      <div class="body">
+        <p class="caption">当前课程</p><p id="chapter">进入视频课程后自动识别</p>
+        <div class="metrics"><div><p class="caption">播放进度</p><span id="progress-text">—</span></div><p id="detail">等待课程播放器</p></div>
+        <progress id="progress-bar" max="100" value="0" aria-label="视频播放进度"></progress>
+        <div class="controls"><div><label class="control-label" for="speed">播放倍速</label><select id="speed"></select></div><div><span class="control-label">自动切换 · 95%</span><button id="stop" type="button">停止自动切换</button></div></div>
+      </div>
+      <details><summary>设置</summary><label class="setting"><span>暂停时自动播放</span><input id="auto-play" type="checkbox"></label><p class="hint">首次播放受限时，请手动播放一次。倍速不会增加累计观看时长。</p></details>
+      <details><summary id="log-label">日志（0）</summary><pre id="logs" aria-label="脚本运行日志"></pre></details>
     </section>`;
   const speedSelect = panel.getElementById('speed');
   const speeds = [...new Set([1, 1.5, 2, 3, 4, 8, Number(window.wanfangSpeed)])];
@@ -90,10 +104,16 @@
     const logs = panel.getElementById('logs');
     logs.textContent = logLines.join('\n');
     logs.scrollTop = logs.scrollHeight;
-    panel.getElementById('log-label').textContent = `运行日志（${logLines.length}）`;
+    panel.getElementById('log-label').textContent = `日志（${logLines.length}）`;
   }
-  function showDetail(message) {
+  function showDetail(message, title = '', video = null) {
     panel.getElementById('detail').textContent = message;
+    const chapter = panel.getElementById('chapter');
+    chapter.textContent = title || '进入视频课程后自动识别';
+    chapter.title = title;
+    const progress = video ? Math.max(0, Math.min(100, video.currentTime / video.duration * 100)) : null;
+    panel.getElementById('progress-text').textContent = progress === null ? '—' : `${progress.toFixed(1)}%`;
+    panel.getElementById('progress-bar').value = progress ?? 0;
   }
   function tryAutoPlay(video) {
     if (!window.wanfangAutoPlay || !video?.paused || video.ended || video.readyState < 2) return;
@@ -154,6 +174,7 @@
       panel.getElementById('status').textContent = '● 运行中';
       panel.getElementById('status').removeAttribute('data-stopped');
       panel.getElementById('stop').textContent = '停止自动切换';
+      panel.getElementById('stop').removeAttribute('data-off');
       log('info', '已恢复自动切换。');
     }
   });
@@ -198,7 +219,7 @@
     const title = root?.querySelector('h1')?.textContent.trim() || '';
     if (title.includes('随堂测验')) {
       window.wanfangAutoNextStop('已进入测验，自动切换停止。完成后请重新运行脚本。');
-      showDetail('当前是测验，请手动完成。');
+      showDetail('请手动完成测验', title);
       return;
     }
     if (pending && Date.now() - pending.at > 20000) {
@@ -207,12 +228,11 @@
     }
     const video = root?.querySelector('video');
     if (!video || !Number.isFinite(video.duration) || video.duration <= 0) {
-      showDetail('等待课程播放器，进入视频课程后自动处理…');
+      showDetail('等待课程播放器', title);
       return;
     }
     applySpeed(video);
-    const progress = Math.min(100, video.currentTime / video.duration * 100).toFixed(1);
-    showDetail(`${pending ? '正在切换下一节' : video.paused ? '视频已暂停' : '正在播放'} · ${video.playbackRate}× · ${progress}%\n${title}`);
+    showDetail(`${pending ? '切换中' : video.ended ? '已结束' : video.paused ? '已暂停' : '播放中'} · ${video.playbackRate}×`, title, video);
     const source = video.currentSrc || video.src;
     const key = `${location.href}|${title}|${source}`;
 
@@ -248,9 +268,10 @@
     if (!running) return;
     running = false;
     const status = panel.getElementById('status');
-    status.textContent = '● 运行中 · 切换关闭';
+    status.textContent = '● 切换关闭';
     status.setAttribute('data-stopped', '');
     panel.getElementById('stop').textContent = '恢复自动切换';
+    panel.getElementById('stop').setAttribute('data-off', '');
     log('info', reason);
   };
   window.wanfangCourseHelperCleanup = () => {

@@ -62,6 +62,9 @@ async function main() {
   const e = setup(); e.video.paused = true; e.run(); await e.tick();
   assert.equal(e.document.visibilityState, 'visible');
   assert.equal(e.state.plays, 1); assert.equal(e.video.playbackRate, 1);
+  assert.equal(e.control('chapter').textContent, e.state.title);
+  assert.equal(e.control('progress-text').textContent, '35.0%');
+  assert.equal(e.control('progress-bar').value, 35);
   e.video.paused = true; await e.tick(); assert.equal(e.state.plays, 2);
   const checkbox = e.control('auto-play'); checkbox.checked = false; checkbox.events.change();
   e.video.paused = true; e.video.currentTime = 95; await e.tick();
@@ -77,9 +80,12 @@ async function main() {
   assert.equal(e.window.wanfangSpeed, 4); assert.equal(e.video.playbackRate, 4);
   e.control('stop').events.click();
   assert.equal(e.timers.size, 1); assert.equal(e.control('stop').textContent, '恢复自动切换');
+  assert.equal(e.control('status').textContent, '● 切换关闭');
+  assert.equal(e.control('stop')['data-off'], '');
   e.video.paused = true; await e.tick(); assert.equal(e.state.plays, 5); // Stop-next leaves autoplay enabled.
   e.video.currentTime = 96; await e.tick(); assert.equal(e.state.clicks, 1);
   e.control('stop').events.click(); await e.tick(); assert.equal(e.state.clicks, 2);
+  assert.equal(e.control('stop')['data-off'], undefined);
   e.run(); assert.equal(e.timers.size, 1); assert.equal(e.hosts.length, 1);
   assert.equal(e.window.wanfangSpeed, 4);
   e.video.currentTime = 0;
@@ -112,6 +118,8 @@ async function main() {
   assert.equal(timeout.state.clicks, 1);
   const invalid = setup(); invalid.run(); invalid.video.duration = NaN; invalid.video.paused = true; await invalid.tick();
   assert.equal(invalid.state.clicks, 0); assert.equal(invalid.state.plays, 0);
+  assert.equal(invalid.control('progress-text').textContent, '—');
+  assert.equal(invalid.control('progress-bar').value, 0);
   const blocked = setup(); blocked.run(); blocked.video.paused = true; blocked.state.playError = true;
   await blocked.tick(); await blocked.tick(); assert.equal(blocked.state.plays, 1);
   blocked.state.now = 4999; await blocked.tick(); assert.equal(blocked.state.plays, 1);
