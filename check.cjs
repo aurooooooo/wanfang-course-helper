@@ -78,14 +78,13 @@ async function main() {
   assert.equal(e.state.plays, 4);
   const select = e.control('speed'); select.value = '4'; select.events.change();
   assert.equal(e.window.wanfangSpeed, 4); assert.equal(e.video.playbackRate, 4);
-  e.control('stop').events.click();
-  assert.equal(e.timers.size, 1); assert.equal(e.control('stop').textContent, '恢复自动切换');
-  assert.equal(e.control('status').textContent, '● 切换关闭');
-  assert.equal(e.control('stop')['data-off'], '');
+  e.control('auto-next').checked = false; e.control('auto-next').events.change();
+  assert.equal(e.timers.size, 1); assert.equal(e.control('auto-next').checked, false);
+  assert.equal(e.control('status').textContent, '● 跳转关闭');
   e.video.paused = true; await e.tick(); assert.equal(e.state.plays, 5); // Stop-next leaves autoplay enabled.
   e.video.currentTime = 96; await e.tick(); assert.equal(e.state.clicks, 1);
-  e.control('stop').events.click(); await e.tick(); assert.equal(e.state.clicks, 2);
-  assert.equal(e.control('stop')['data-off'], undefined);
+  e.control('auto-next').checked = true; e.control('auto-next').events.change(); await e.tick(); assert.equal(e.state.clicks, 2);
+  assert.equal(e.control('status').textContent, '● 运行中');
   e.run(); assert.equal(e.timers.size, 1); assert.equal(e.hosts.length, 1);
   assert.equal(e.window.wanfangSpeed, 4);
   e.video.currentTime = 0;
@@ -109,13 +108,42 @@ async function main() {
   assert.equal(e.hosts.length, 1); assert.equal(e.hosts[0], host); // Reattach after app redraw.
 
   e.state.title = '随堂测验'; const clicks = e.state.clicks; await e.tick();
-  assert.equal(e.control('stop').textContent, '恢复自动切换'); assert.equal(e.state.clicks, clicks);
+  assert.equal(e.control('auto-next').checked, false); assert.equal(e.state.clicks, clicks);
   const last = setup(); last.run(); last.state.next = false; last.video.currentTime = 100;
   last.video.ended = true; last.video.paused = true; await last.tick(); await last.tick();
-  assert.equal(last.state.plays, 0); assert.equal(last.control('stop').textContent, '恢复自动切换');
+  assert.equal(last.state.plays, 0); assert.equal(last.control('auto-next').checked, false);
   const timeout = setup(); timeout.run(); timeout.video.currentTime = 95; await timeout.tick();
-  timeout.state.now = 20001; await timeout.tick(); assert.equal(timeout.control('stop').textContent, '恢复自动切换');
+  timeout.state.now = 20001; await timeout.tick(); assert.equal(timeout.control('auto-next').checked, false);
   assert.equal(timeout.state.clicks, 1);
+  const custom = setup(); custom.run();
+  const threshold = custom.control('threshold');
+  assert.equal(threshold.value, '95');
+  for (const value of ['', '0', '101', '50.5', 'abc']) {
+    threshold.value = value; threshold.events.change();
+    assert.equal(threshold.value, '95');
+    assert.ok(custom.control('threshold-error').textContent.includes('保留原设置'));
+  }
+  threshold.value = '80'; threshold.events.change();
+  assert.equal(custom.control('threshold-error').textContent, '');
+  custom.video.currentTime = 79.9; await custom.tick(); assert.equal(custom.state.clicks, 0);
+  custom.video.currentTime = 80; await custom.tick(); await custom.tick(); assert.equal(custom.state.clicks, 1);
+  assert.ok(custom.state.logs.some(v => String(v[0]).includes('播放达到 80%')));
+  custom.state.title = 'video two'; custom.video.currentSrc = 'two'; custom.video.currentTime = 0;
+  await custom.tick(); custom.video.currentTime = 80; await custom.tick(); assert.equal(custom.state.clicks, 2);
+  const full = setup(); full.run(); full.control('threshold').value = '100'; full.control('threshold').events.change();
+  full.video.currentTime = 99.9; await full.tick(); assert.equal(full.state.clicks, 0);
+  full.video.currentTime = 100; full.video.paused = true; full.video.ended = true;
+  await full.tick(); assert.equal(full.state.clicks, 1); assert.equal(full.state.plays, 0);
+  const off = setup(); off.run(); off.control('auto-next').checked = false; off.control('auto-next').events.change();
+  off.control('threshold').value = '1'; off.control('threshold').events.change();
+  off.video.currentTime = 100; await off.tick(); assert.equal(off.state.clicks, 0);
+  off.control('auto-next').checked = true; off.control('auto-next').events.change();
+  await off.tick(); assert.equal(off.state.clicks, 1);
+  const raised = setup(); raised.run(); raised.video.currentTime = 96;
+  raised.control('threshold').value = '100'; raised.control('threshold').events.change();
+  await raised.tick(); assert.equal(raised.state.clicks, 0);
+  raised.control('threshold').value = '90'; raised.control('threshold').events.change();
+  await raised.tick(); assert.equal(raised.state.clicks, 1);
   const invalid = setup(); invalid.run(); invalid.video.duration = NaN; invalid.video.paused = true; await invalid.tick();
   assert.equal(invalid.state.clicks, 0); assert.equal(invalid.state.plays, 0);
   assert.equal(invalid.control('progress-text').textContent, '—');
@@ -149,6 +177,6 @@ async function main() {
     const other = setup(route); other.run(); assert.equal(other.timers.size, 0);
     assert.equal(Object.hasOwn(other.document, 'visibilityState'), false);
   }
-  console.log('PASS: training scope and SPA navigation, mount recovery, autoplay on/off/retry, ended handling, draggable bounds/keyboard, stop/resume, speed, 95% switch, delayed source, panel deduplication, log limit, quiz, timeout, invalid duration, cleanup. Real course E2E untested.');
+  console.log('PASS: training scope and SPA navigation, mount recovery, autoplay on/off/retry, ended handling, draggable bounds/keyboard, auto-next on/off, custom threshold and validation, 100% switch, speed, delayed source, panel deduplication, log limit, quiz, timeout, invalid duration, cleanup. Real course E2E untested.');
 }
 main().catch(error => {console.error(error); process.exitCode = 1;});

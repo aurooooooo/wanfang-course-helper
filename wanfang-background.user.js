@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         万方课程后台播放、倍速与自动下一节
 // @namespace    local.wanfang.background
-// @version      1.5.0
+// @version      1.6.0
 // @author       aurooooooo
 // @license      MIT
 // @homepageURL  https://github.com/aurooooooo/wanfang-course-helper
@@ -31,7 +31,7 @@
     console.error('无法启用后台播放补丁。', error);
     return;
   }
-  const threshold = 0.95;
+  let thresholdPercent = 95;
   // 可在控制台输入 window.wanfangSpeed = 3（或4、1）改变倍速。
   window.wanfangSpeed ??= 1;
   window.wanfangAutoPlay ??= true;
@@ -65,15 +65,14 @@
       #detail{color:#43574c;font-size:12px;margin:0;text-align:right}
       progress{display:block;appearance:none;width:100%;height:5px;border:0;border-radius:8px;overflow:hidden;background:#e6ece8;accent-color:#146347}
       progress::-webkit-progress-bar{background:#e6ece8}progress::-webkit-progress-value{background:#146347}progress::-moz-progress-bar{background:#146347}
-      .controls{display:grid;grid-template-columns:80px 1fr;gap:12px;margin-top:17px}
-      .control-label{display:block;color:#43574c;font-size:11px;margin-bottom:5px}
-      select,button{width:100%;font:inherit;min-height:36px;border:1px solid #bbc9c0;border-radius:7px;background:#fff;color:#17251f;padding:6px 9px}
-      button{cursor:pointer;background:#146347;color:#fff;border-color:#146347;font-size:12px;font-weight:600}
-      button:hover{background:#0e5139}button[data-off]{background:#fff;color:#146347;border-color:#93b5a1}button[data-off]:hover{background:#edf5f0}
-      header:focus-visible,select:focus-visible,button:focus-visible,summary:focus-visible,input:focus-visible{outline:2px solid #146347;outline-offset:3px}
+      select,input[type=number]{font:inherit;min-height:34px;border:1px solid #bbc9c0;border-radius:7px;background:#fff;color:#17251f;padding:5px 8px}
+      select{width:84px;cursor:pointer}
+      header:focus-visible,select:focus-visible,summary:focus-visible,input:focus-visible{outline:2px solid #146347;outline-offset:3px}
       details{border-top:1px solid #e3e9e5;padding:10px 16px}summary{cursor:pointer;color:#34483d;font-size:12px;font-weight:600}
       pre{max-height:160px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:11px/1.7 ui-monospace,monospace;color:#243c2e;background:#f1f5f2;padding:10px;border-radius:7px;margin:10px 0 0}
-      .setting{display:flex;justify-content:space-between;align-items:center;gap:12px;margin:12px 0 0;cursor:pointer}.setting input{width:17px;height:17px;margin:0;accent-color:#146347;cursor:pointer}
+      .setting{display:flex;justify-content:space-between;align-items:center;gap:12px;margin:12px 0 0;cursor:pointer}.setting input[type=checkbox]{width:17px;height:17px;margin:0;accent-color:#146347;cursor:pointer}
+      .percent-input{display:flex;align-items:center;gap:6px;color:#43574c}.percent-input input{width:68px}
+      #threshold-error{color:#a32929}#threshold-error:empty{display:none}
       .hint{font-size:11px;color:#52635a;margin:7px 0 2px;line-height:1.6}
     </style>
     <section aria-label="课程脚本控制面板">
@@ -82,9 +81,16 @@
         <p class="caption">当前课程</p><p id="chapter">进入视频课程后自动识别</p>
         <div class="metrics"><div><p class="caption">播放进度</p><span id="progress-text">—</span></div><p id="detail">等待课程播放器</p></div>
         <progress id="progress-bar" max="100" value="0" aria-label="视频播放进度"></progress>
-        <div class="controls"><div><label class="control-label" for="speed">播放倍速</label><select id="speed"></select></div><div><span class="control-label">自动切换 · 95%</span><button id="stop" type="button">停止自动切换</button></div></div>
       </div>
-      <details><summary>设置</summary><label class="setting"><span>暂停时自动播放</span><input id="auto-play" type="checkbox"></label><p class="hint">首次播放受限时，请手动播放一次。倍速不会增加累计观看时长。</p></details>
+      <details><summary>设置</summary>
+        <label class="setting" for="speed"><span>播放倍速</span><select id="speed"></select></label>
+        <label class="setting"><span>暂停时自动播放</span><input id="auto-play" type="checkbox"></label>
+        <label class="setting"><span>自动跳转下一节</span><input id="auto-next" type="checkbox"></label>
+        <label class="setting" for="threshold"><span>跳转进度</span><span class="percent-input"><input id="threshold" type="number" min="1" max="100" step="1" value="95" aria-describedby="threshold-hint threshold-error"><span>%</span></span></label>
+        <p id="threshold-hint" class="hint">1–100%，达到后进入下一节。关闭自动跳转后不生效。</p>
+        <p id="threshold-error" class="hint" role="alert"></p>
+        <p class="hint">首次播放受限时，请手动播放一次。倍速不会增加累计观看时长。</p>
+      </details>
       <details><summary id="log-label">日志（0）</summary><pre id="logs" aria-label="脚本运行日志"></pre></details>
     </section>`;
   const speedSelect = panel.getElementById('speed');
@@ -166,17 +172,30 @@
     log('info', `暂停时自动播放：${window.wanfangAutoPlay ? '已开启' : '已关闭'}。`);
     if (window.wanfangAutoPlay && !pending) tryAutoPlay(document.querySelector('#rightBox video'));
   });
-  panel.getElementById('stop').addEventListener('click', () => {
-    if (running) window.wanfangAutoNextStop();
+  const autoNextCheckbox = panel.getElementById('auto-next');
+  autoNextCheckbox.checked = running;
+  autoNextCheckbox.addEventListener('change', () => {
+    if (!autoNextCheckbox.checked) window.wanfangAutoNextStop();
     else {
       running = true;
       switchedKey = '';
       panel.getElementById('status').textContent = '● 运行中';
       panel.getElementById('status').removeAttribute('data-stopped');
-      panel.getElementById('stop').textContent = '停止自动切换';
-      panel.getElementById('stop').removeAttribute('data-off');
       log('info', '已恢复自动切换。');
     }
+  });
+  const thresholdInput = panel.getElementById('threshold');
+  thresholdInput.value = String(thresholdPercent);
+  thresholdInput.addEventListener('change', () => {
+    const value = Number(thresholdInput.value);
+    if (!Number.isInteger(value) || value < 1 || value > 100) {
+      thresholdInput.value = String(thresholdPercent);
+      panel.getElementById('threshold-error').textContent = '请输入 1–100 的整数，已保留原设置。';
+      return;
+    }
+    panel.getElementById('threshold-error').textContent = '';
+    thresholdPercent = value;
+    log('info', `跳转进度设置为 ${thresholdPercent}%。`);
   });
   const dragHandle = panel.getElementById('drag-handle');
   let drag = null;
@@ -218,12 +237,12 @@
     const root = document.querySelector('#rightBox');
     const title = root?.querySelector('h1')?.textContent.trim() || '';
     if (title.includes('随堂测验')) {
-      window.wanfangAutoNextStop('已进入测验，自动切换停止。完成后请重新运行脚本。');
+      window.wanfangAutoNextStop('已进入测验。完成后可在设置中重新开启自动跳转。');
       showDetail('请手动完成测验', title);
       return;
     }
     if (pending && Date.now() - pending.at > 20000) {
-      window.wanfangAutoNextStop('下一节未在20秒内加载，请手动检查并重新运行脚本。');
+      window.wanfangAutoNextStop('下一节加载超时，请检查课程后在设置中重新开启自动跳转。');
       return;
     }
     const video = root?.querySelector('video');
@@ -250,7 +269,7 @@
     if (!running) return;
     if (key === switchedKey || video.seeking ||
         (video.paused && !video.ended) ||
-        video.currentTime / video.duration < threshold) return;
+        video.currentTime / video.duration < thresholdPercent / 100) return;
 
     const next = root.querySelector('.progress-count .next');
     if (!next) {
@@ -259,7 +278,7 @@
     }
     switchedKey = key;
     pending = { title, video, source, at: Date.now() };
-    log('info', `播放达到95%，切换到：${next.title || '下一节'}`);
+    log('info', `播放达到 ${thresholdPercent}%，切换到：${next.title || '下一节'}`);
     next.click();
   }, 1000);
 
@@ -268,10 +287,9 @@
     if (!running) return;
     running = false;
     const status = panel.getElementById('status');
-    status.textContent = '● 切换关闭';
+    status.textContent = '● 跳转关闭';
     status.setAttribute('data-stopped', '');
-    panel.getElementById('stop').textContent = '恢复自动切换';
-    panel.getElementById('stop').setAttribute('data-off', '');
+    autoNextCheckbox.checked = false;
     log('info', reason);
   };
   window.wanfangCourseHelperCleanup = () => {
@@ -281,7 +299,7 @@
     mountObserver.disconnect();
     host.remove();
   };
-  log('info', '课程助手已启动：后台播放、倍速调节和95%自动下一节；拖动标题栏可移动面板。');
+  log('info', `课程助手已启动：${window.wanfangSpeed}×，播放达到 ${thresholdPercent}% 自动跳转；可在设置中调整。`);
   log('info', `暂停时自动播放：${window.wanfangAutoPlay ? '已开启' : '已关闭'}，可在设置中调整。`);
   log('warn', '倍速不会同步增加累计观看时长，提前切换可能无法满足时长要求。');
 })();
