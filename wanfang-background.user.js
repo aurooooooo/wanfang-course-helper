@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         万方课程后台播放、倍速与自动下一节
 // @namespace    local.wanfang.background
-// @version      1.4.0
+// @version      1.4.1
 // @author       aurooooooo
 // @license      MIT
 // @homepageURL  https://github.com/aurooooooo/wanfang-course-helper
@@ -33,7 +33,7 @@
   }
   const threshold = 0.95;
   // 可在控制台输入 window.wanfangSpeed = 3（或4、1）改变倍速。
-  window.wanfangSpeed ??= 2;
+  window.wanfangSpeed ??= 1;
   window.wanfangAutoPlay ??= true;
   if (window.wanfangCourseHelperCleanup) window.wanfangCourseHelperCleanup();
   else window.wanfangAutoNextStop?.();

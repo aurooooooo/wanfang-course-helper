@@ -61,7 +61,7 @@ function setup(pathname = '/e-training/quality/courselearn') {
 async function main() {
   const e = setup(); e.video.paused = true; e.run(); await e.tick();
   assert.equal(e.document.visibilityState, 'visible');
-  assert.equal(e.state.plays, 1); assert.equal(e.video.playbackRate, 2);
+  assert.equal(e.state.plays, 1); assert.equal(e.video.playbackRate, 1);
   e.video.paused = true; await e.tick(); assert.equal(e.state.plays, 2);
   const checkbox = e.control('auto-play'); checkbox.checked = false; checkbox.events.change();
   e.video.paused = true; e.video.currentTime = 95; await e.tick();
