@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         万方课程后台播放、倍速与自动下一节
 // @namespace    local.wanfang.background
-// @version      1.6.0
+// @version      1.6.1
 // @author       aurooooooo
 // @license      MIT
 // @homepageURL  https://github.com/aurooooooo/wanfang-course-helper
@@ -44,6 +44,7 @@
   let running = true;
   let disposed = false;
   const playAttempts = new WeakMap();
+  const coursePatches = new Map();
 
   const host = document.createElement('div');
   host.id = 'wanfang-course-helper';
@@ -120,6 +121,69 @@
     const progress = video ? Math.max(0, Math.min(100, video.currentTime / video.duration * 100)) : null;
     panel.getElementById('progress-text').textContent = progress === null ? '—' : `${progress.toFixed(1)}%`;
     panel.getElementById('progress-bar').value = progress ?? 0;
+  }
+  function patchCourseTimer(root) {
+    if (!root) return null;
+    const video = root.querySelector('video');
+    const queue = [], seen = new Set();
+    for (let element = root; element; element = element.parentElement) {
+      if (element.__vue__) queue.push(element.__vue__);
+    }
+    for (let index = 0; index < queue.length; index++) {
+      const course = queue[index];
+      if (seen.has(course)) continue;
+      seen.add(course);
+      if (!course._isDestroyed && course.$el?.contains(video || root) &&
+          typeof course.toggleSection === 'function' &&
+          typeof course.learnInterval === 'function' && typeof course.playerPlayCb === 'function') {
+        if (coursePatches.has(course)) {
+          const patch = coursePatches.get(course);
+          return course.toggleSection === patch.wrapped ? patch : null;
+        }
+        const patch = {course, original: course.toggleSection, waiting: null};
+        patch.wrapped = function (...args) {
+          if (disposed) return patch.original.apply(this, args);
+          const oldTimer = this.learnTimer;
+          const oldVideo = this.$el.querySelector('video');
+          const previous = {video: oldVideo, source: oldVideo?.currentSrc || oldVideo?.src,
+            chapter: this.activeList?.listResourceCode};
+          const result = patch.original.apply(this, args);
+          if (this.contentType === 'video' && ((oldTimer && this.learnTimer === oldTimer) || patch.waiting)) {
+            // The site's switch handler clears the interval but leaves its ID behind.
+            // Resume through the site's play callback only after the new media plays.
+            clearInterval(this.learnTimer);
+            this.learnTimer = null;
+            this.enterTime = null;
+            patch.waiting = previous;
+            log('info', '已清理章节切换后失效的学习计时器。');
+          }
+          return result;
+        };
+        course.toggleSection = patch.wrapped;
+        coursePatches.set(course, patch);
+        log('info', '已启用章节切换计时修复。');
+        return patch;
+      }
+      queue.push(...(course.$children || []));
+    }
+    return null;
+  }
+  function resumeCourseTimer(patch, video) {
+    if (!patch?.waiting || video.paused || video.ended || video.seeking || video.readyState < 2) return;
+    const {course, waiting} = patch;
+    if (waiting.chapter !== course.activeList?.listResourceCode && video === waiting.video &&
+        (video.currentSrc || video.src) === waiting.source) return;
+    try {
+      if (!course.learnTimer) course.playerPlayCb();
+      if (course.learnTimer) {
+        patch.waiting = null;
+        log('info', '当前章节的学习计时已启动。');
+      }
+    } catch (error) {
+      patch.waiting = null;
+      log('warn', '学习计时恢复失败，请刷新课件后再试。');
+      window.wanfangAutoNextStop('学习计时异常，自动跳转已关闭。');
+    }
   }
   function tryAutoPlay(video) {
     if (!window.wanfangAutoPlay || !video?.paused || video.ended || video.readyState < 2) return;
@@ -232,9 +296,11 @@
   const mountObserver = new MutationObserver(mountPanel);
   mountObserver.observe(document.documentElement, {childList: true, subtree: true});
   mountPanel();
+  patchCourseTimer(document.querySelector('#rightBox'));
 
   const timer = setInterval(() => {
     const root = document.querySelector('#rightBox');
+    const coursePatch = patchCourseTimer(root);
     const title = root?.querySelector('h1')?.textContent.trim() || '';
     if (title.includes('随堂测验')) {
       window.wanfangAutoNextStop('已进入测验。完成后可在设置中重新开启自动跳转。');
@@ -251,6 +317,7 @@
       return;
     }
     applySpeed(video);
+    resumeCourseTimer(coursePatch, video);
     showDetail(`${pending ? '切换中' : video.ended ? '已结束' : video.paused ? '已暂停' : '播放中'} · ${video.playbackRate}×`, title, video);
     const source = video.currentSrc || video.src;
     const key = `${location.href}|${title}|${source}`;
@@ -276,6 +343,11 @@
       window.wanfangAutoNextStop('没有可用的下一节按钮，自动切换停止，当前视频可继续播放。');
       return;
     }
+    if (!coursePatch) {
+      log('warn', '未识别到课程计时组件，请刷新检查；为避免切换后停止计时，已关闭自动跳转。');
+      window.wanfangAutoNextStop('课程计时组件未识别，自动跳转已关闭。');
+      return;
+    }
     switchedKey = key;
     pending = { title, video, source, at: Date.now() };
     log('info', `播放达到 ${thresholdPercent}%，切换到：${next.title || '下一节'}`);
@@ -297,6 +369,10 @@
     disposed = true;
     pending = null;
     mountObserver.disconnect();
+    for (const {course, original, wrapped} of coursePatches.values()) {
+      if (course.toggleSection === wrapped) course.toggleSection = original;
+    }
+    coursePatches.clear();
     host.remove();
   };
   log('info', `课程助手已启动：${window.wanfangSpeed}×，播放达到 ${thresholdPercent}% 自动跳转；可在设置中调整。`);

@@ -3,8 +3,9 @@ const fs = require('node:fs'), vm = require('node:vm'), path = require('node:pat
 const source = fs.readFileSync(path.join(__dirname, 'wanfang-background.user.js'), 'utf8');
 const flush = () => new Promise(resolve => setImmediate(resolve));
 function setup(pathname = '/e-training/quality/courselearn') {
-  const state = {title: '1.1 video one', clicks: 0, plays: 0, now: 0, logs: [], next: true, rootPresent: true};
-  const timers = new Map(); let id = 0;
+  const state = {title: '1.1 video one', chapter: 'one', contentType: 'video', learnedSeconds: 0,
+    records: [], clicks: 0, plays: 0, now: 0, logs: [], next: true, rootPresent: true};
+  const timers = new Map(), learningTimers = new Map(); let id = 0;
   const video = {duration: 100, currentTime: 35, currentSrc: 'one', readyState: 4,
     paused: false, ended: false, seeking: false, playbackRate: 1,
     play() {
@@ -28,7 +29,7 @@ function setup(pathname = '/e-training/quality/courselearn') {
     getBoundingClientRect() {return {left: parseFloat(this.style.left ?? 708), top: parseFloat(this.style.top ?? 472), width: 300, height: 280};}
     remove() {const index = hosts.indexOf(this); if (index >= 0) hosts.splice(index, 1);}
   }
-  const root = {querySelector(selector) {
+  const root = {contains: node => node === state.video || node === root, querySelector(selector) {
     if (selector === 'h1') return {textContent: state.title};
     if (selector === 'video') return state.video;
     if (selector === '.progress-count .next' && state.next)
@@ -44,16 +45,45 @@ function setup(pathname = '/e-training/quality/courselearn') {
   const window = {innerWidth: 1024, innerHeight: 768};
   const context = vm.createContext({window, document,
     location: {hostname: 'cx.wanfangdata.com.cn', pathname, href: 'course'},
-    Date: class extends Date {static now() {return state.now;}},
-    setInterval(fn) {timers.set(++id, fn); return id;},
-    clearInterval(key) {timers.delete(key);},
+    Date: class extends Date {
+      constructor(...args) {super(...(args.length ? args : [state.now]));}
+      static now() {return state.now;}
+    },
+    setInterval(fn, delay) {(delay === 60000 ? learningTimers : timers).set(++id, fn); return id;},
+    clearInterval(key) {timers.delete(key); learningTimers.delete(key);},
     MutationObserver: class {
       constructor(callback) {this.callback = callback; this.active = false; observers.push(this);}
       observe() {this.active = true;}
       disconnect() {this.active = false;}
     },
     console: Object.fromEntries(['info', 'warn', 'error'].map(k => [k, (...v) => state.logs.push(v)]))});
-  return {state, video, document, window, timers, hosts, observers, context,
+  const course = {
+    $el: root, learnTimer: null, enterTime: null,
+    get activeList() {return {listResourceCode: state.chapter};},
+    get contentType() {return state.contentType;},
+    insertrecord() {state.records.push({chapter: state.chapter, start: this.enterTime?.getTime() ?? null, end: state.now});},
+    updateProgress() {if (this.enterTime) state.learnedSeconds += (state.now - this.enterTime.getTime()) / 1000;},
+    learnInterval() {
+      if (this.learnTimer) return;
+      this.learnTimer = context.setInterval(() => {
+        this.insertrecord(); this.updateProgress(); this.enterTime = new context.Date();
+      }, 60000);
+    },
+    playerPlayCb() {this.enterTime = new context.Date(); this.learnInterval();},
+    playerPauseCb() {
+      context.clearInterval(this.learnTimer); this.learnTimer = null;
+      this.insertrecord(); this.updateProgress();
+    },
+    toggleSection(chapter) {
+      // Deliberately reproduce the site's cleared interval with a retained ID.
+      context.clearInterval(this.learnTimer); this.insertrecord(); this.learnInterval();
+      state.chapter = chapter;
+      return 'switched';
+    },
+  };
+  root.__vue__ = course;
+  return {state, video, document, window, timers, learningTimers, course, root, hosts, observers, context,
+    learningTick: () => [...learningTimers.values()].forEach(fn => fn()),
     control: id => hosts[0].shadow.getElementById(id),
     run: () => vm.runInContext(source, context),
     tick: async () => { [...timers.values()].forEach(fn => fn()); await flush(); }};
@@ -159,6 +189,75 @@ async function main() {
   Object.defineProperty(badSpeed.video, 'playbackRate', {get: () => 1, set() {throw Error('unsupported');}});
   await badSpeed.tick(); await badSpeed.tick();
   assert.equal(badSpeed.state.logs.filter(v => String(v[0]).includes('99')).length, 1);
+  const native = setup(); native.course.playerPlayCb();
+  const originalToggle = native.course.toggleSection;
+  native.run(); native.state.now = 60000; native.learningTick();
+  assert.equal(native.state.records.length, 1); assert.equal(native.state.learnedSeconds, 60);
+  native.state.now = 95000;
+  assert.equal(native.course.toggleSection('two'), 'switched');
+  assert.equal(native.course.learnTimer, null); assert.equal(native.course.enterTime, null);
+  assert.equal(native.learningTimers.size, 0);
+  await native.tick(); // New chapter, but still the old media: do not start counting.
+  assert.equal(native.learningTimers.size, 0);
+  native.video.currentSrc = 'two'; native.video.currentTime = 0; native.video.paused = true;
+  native.state.title = 'video two'; native.state.now = 100000;
+  await native.tick(); await native.tick();
+  assert.equal(native.learningTimers.size, 1); assert.equal(native.course.enterTime.getTime(), 100000);
+  assert.equal(native.state.records.length, 2); // No synthetic record during recovery.
+  native.state.now = 160000; native.learningTick();
+  assert.deepEqual(native.state.records.at(-1), {chapter: 'two', start: 100000, end: 160000});
+  assert.equal(native.state.learnedSeconds, 120); // Loading time was not added.
+  native.course.toggleSection('three'); native.video.currentSrc = 'three';
+  native.state.title = 'video three'; await native.tick();
+  assert.equal(native.learningTimers.size, 1);
+  native.run(); assert.equal(native.learningTimers.size, 1); // Re-execution cannot duplicate native timers.
+  native.window.wanfangCourseHelperCleanup();
+  assert.equal(native.course.toggleSection, originalToggle); assert.equal(native.learningTimers.size, 1);
+  const paused = setup(); paused.course.playerPlayCb(); paused.run();
+  paused.control('auto-play').checked = false; paused.control('auto-play').events.change();
+  paused.course.toggleSection('two'); paused.video.currentSrc = 'two'; paused.video.paused = true;
+  paused.state.now = 120000; await paused.tick(); await paused.tick();
+  assert.equal(paused.learningTimers.size, 0); assert.equal(paused.state.learnedSeconds, 0);
+  paused.video.paused = false; paused.course.playerPlayCb(); await paused.tick();
+  assert.equal(paused.learningTimers.size, 1); assert.equal(paused.course.enterTime.getTime(), 120000);
+  const rapid = setup(); rapid.course.playerPlayCb(); rapid.run();
+  rapid.control('auto-play').checked = false; rapid.control('auto-play').events.change();
+  rapid.course.toggleSection('two'); rapid.video.currentSrc = 'two'; rapid.video.paused = true;
+  rapid.course.toggleSection('three'); rapid.video.currentSrc = 'three'; rapid.state.now = 180000;
+  await rapid.tick(); assert.equal(rapid.learningTimers.size, 0); assert.equal(rapid.course.enterTime, null);
+  rapid.video.paused = false; await rapid.tick();
+  assert.equal(rapid.learningTimers.size, 1); assert.equal(rapid.course.enterTime.getTime(), 180000);
+  const healthy = setup(); healthy.course.playerPlayCb();
+  healthy.course.toggleSection = function (chapter) {
+    this.playerPauseCb(); healthy.state.chapter = chapter; healthy.video.currentSrc = chapter; this.playerPlayCb();
+  };
+  healthy.run(); healthy.course.toggleSection('two');
+  const healthyTimer = healthy.course.learnTimer;
+  await healthy.tick(); assert.equal(healthy.course.learnTimer, healthyTimer); assert.equal(healthy.learningTimers.size, 1);
+  const automatic = setup(); automatic.course.playerPlayCb(); automatic.run();
+  automatic.root.querySelector = selector => selector === 'h1' ? {textContent: automatic.state.title}
+    : selector === 'video' ? automatic.video : selector === '.progress-count .next' ? {title: 'two', click() {
+      automatic.state.clicks++; automatic.course.toggleSection('two'); automatic.state.title = 'video two';
+      automatic.video.currentSrc = 'two'; automatic.video.currentTime = 0; automatic.video.paused = true;
+    }} : null;
+  automatic.video.currentTime = 95; await automatic.tick(); await automatic.tick(); await automatic.tick();
+  await automatic.tick(); assert.equal(automatic.state.clicks, 1); assert.equal(automatic.learningTimers.size, 1);
+  const unavailable = setup(); delete unavailable.root.__vue__; unavailable.run(); unavailable.video.currentTime = 95;
+  await unavailable.tick(); assert.equal(unavailable.state.clicks, 0); assert.equal(unavailable.control('auto-next').checked, false);
+  const broken = setup(); broken.course.playerPlayCb(); broken.run(); broken.course.toggleSection('two');
+  broken.video.currentSrc = 'two'; broken.course.playerPlayCb = () => {throw Error('native callback failed');};
+  await broken.tick(); await broken.tick(); assert.equal(broken.control('auto-next').checked, false);
+  assert.equal(broken.learningTimers.size, 0);
+  const nested = setup(); nested.root.__vue__ = {$children: [nested.course]};
+  const nestedOriginal = nested.course.toggleSection; nested.run();
+  assert.notEqual(nested.course.toggleSection, nestedOriginal);
+  const ancestor = setup(); delete ancestor.root.__vue__; ancestor.root.parentElement = {__vue__: ancestor.course};
+  const ancestorOriginal = ancestor.course.toggleSection; ancestor.run();
+  assert.notEqual(ancestor.course.toggleSection, ancestorOriginal);
+  const replaced = setup(); replaced.run(); const otherHandler = () => {};
+  replaced.course.toggleSection = otherHandler; replaced.video.currentTime = 95;
+  await replaced.tick(); assert.equal(replaced.state.clicks, 0);
+  replaced.window.wanfangCourseHelperCleanup(); assert.equal(replaced.course.toggleSection, otherHandler);
   for (const route of ['/e-training', '/e-training/', '/e-training/lecture/courselearn', '/e-training/quality/courselearn', '/e-training/activity']) {
     const page = setup(route); page.state.rootPresent = false; page.run(); await page.tick();
     assert.equal(page.hosts.length, 1, route); assert.equal(page.state.plays, 0);
@@ -177,6 +276,6 @@ async function main() {
     const other = setup(route); other.run(); assert.equal(other.timers.size, 0);
     assert.equal(Object.hasOwn(other.document, 'visibilityState'), false);
   }
-  console.log('PASS: training scope and SPA navigation, mount recovery, autoplay on/off/retry, ended handling, draggable bounds/keyboard, auto-next on/off, custom threshold and validation, 100% switch, speed, delayed source, panel deduplication, log limit, quiz, timeout, invalid duration, cleanup. Real course E2E untested.');
+  console.log('PASS: native timing recovery across automatic/manual chapters, no stale-media or paused counting, no timer duplication, cleanup restores handlers, unavailable/failed timing stops auto-next; prior playback, settings and navigation checks. Real course E2E untested.');
 }
 main().catch(error => {console.error(error); process.exitCode = 1;});
