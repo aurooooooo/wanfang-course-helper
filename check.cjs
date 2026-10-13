@@ -2,9 +2,10 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs'), vm = require('node:vm'), path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, 'wanfang-background.user.js'), 'utf8');
 const flush = () => new Promise(resolve => setImmediate(resolve));
-function setup(pathname = '/e-training/quality/courselearn') {
+function setup(pathname = '/e-training/quality/courselearn', storage = new Map()) {
   const state = {title: '1.1 video one', chapter: 'one', contentType: 'video', learnedSeconds: 0,
-    records: [], clicks: 0, plays: 0, now: 0, logs: [], next: true, rootPresent: true};
+    learnDuration: 20, taskDuration: 100, taskDurationText: '00:01:40',
+    records: [], reloads: [], clicks: 0, plays: 0, now: 0, logs: [], next: true, rootPresent: true};
   const timers = new Map(), learningTimers = new Map(); let id = 0;
   const video = {duration: 100, currentTime: 35, currentSrc: 'one', readyState: 4,
     paused: false, ended: false, seeking: false, playbackRate: 1,
@@ -44,7 +45,12 @@ function setup(pathname = '/e-training/quality/courselearn') {
   document.body = document.documentElement;
   const window = {innerWidth: 1024, innerHeight: 768};
   const context = vm.createContext({window, document,
-    location: {hostname: 'cx.wanfangdata.com.cn', pathname, href: 'course'},
+    URL,
+    sessionStorage: {getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value),
+      removeItem: key => storage.delete(key)},
+    location: {hostname: 'cx.wanfangdata.com.cn', pathname,
+      href: `https://cx.wanfangdata.com.cn${pathname}?courseId=test`,
+      reload() {state.reloads.push(this.href);}, replace(url) {state.reloads.push(url);}},
     Date: class extends Date {
       constructor(...args) {super(...(args.length ? args : [state.now]));}
       static now() {return state.now;}
@@ -59,10 +65,15 @@ function setup(pathname = '/e-training/quality/courselearn') {
     console: Object.fromEntries(['info', 'warn', 'error'].map(k => [k, (...v) => state.logs.push(v)]))});
   const course = {
     $el: root, learnTimer: null, enterTime: null,
-    get activeList() {return {listResourceCode: state.chapter};},
+    get activeList() {return {listResourceCode: state.chapter, courseListId: `list-${state.chapter}`,
+      courseWareId: `ware-${state.chapter}`, durationSec: state.taskDuration, duration: state.taskDurationText,
+      isLearned: {learnDuration: state.learnDuration}};},
     get contentType() {return state.contentType;},
     insertrecord() {state.records.push({chapter: state.chapter, start: this.enterTime?.getTime() ?? null, end: state.now});},
-    updateProgress() {if (this.enterTime) state.learnedSeconds += (state.now - this.enterTime.getTime()) / 1000;},
+    updateProgress() {if (this.enterTime) {
+      const elapsed = (state.now - this.enterTime.getTime()) / 1000;
+      state.learnedSeconds += elapsed; state.learnDuration += elapsed;
+    }},
     learnInterval() {
       if (this.learnTimer) return;
       this.learnTimer = context.setInterval(() => {
@@ -77,12 +88,12 @@ function setup(pathname = '/e-training/quality/courselearn') {
     toggleSection(chapter) {
       // Deliberately reproduce the site's cleared interval with a retained ID.
       context.clearInterval(this.learnTimer); this.insertrecord(); this.learnInterval();
-      state.chapter = chapter;
+      state.chapter = chapter; state.learnDuration = 0;
       return 'switched';
     },
   };
   root.__vue__ = course;
-  return {state, video, document, window, timers, learningTimers, course, root, hosts, observers, context,
+  return {state, video, document, window, timers, learningTimers, course, root, hosts, observers, context, storage,
     learningTick: () => [...learningTimers.values()].forEach(fn => fn()),
     control: id => hosts[0].shadow.getElementById(id),
     run: () => vm.runInContext(source, context),
@@ -93,8 +104,9 @@ async function main() {
   assert.equal(e.document.visibilityState, 'visible');
   assert.equal(e.state.plays, 1); assert.equal(e.video.playbackRate, 1);
   assert.equal(e.control('chapter').textContent, e.state.title);
-  assert.equal(e.control('progress-text').textContent, '35.0%');
-  assert.equal(e.control('progress-bar').value, 35);
+  assert.equal(e.control('progress-text').textContent, '20.0%');
+  assert.equal(e.control('progress-bar').value, 20);
+  assert.equal(e.control('task-time').textContent, '累计观看 00:20 / 01:40');
   e.video.paused = true; await e.tick(); assert.equal(e.state.plays, 2);
   const checkbox = e.control('auto-play'); checkbox.checked = false; checkbox.events.change();
   e.video.paused = true; e.video.currentTime = 95; await e.tick();
@@ -258,6 +270,78 @@ async function main() {
   replaced.course.toggleSection = otherHandler; replaced.video.currentTime = 95;
   await replaced.tick(); assert.equal(replaced.state.clicks, 0);
   replaced.window.wanfangCourseHelperCleanup(); assert.equal(replaced.course.toggleSection, otherHandler);
+  function progressFixture() {
+    const fixture = setup(); fixture.video.duration = 1000; fixture.state.taskDuration = 1000;
+    fixture.state.taskDurationText = '00:16:40'; fixture.run(); return fixture;
+  }
+  const stall = progressFixture(); await stall.tick();
+  stall.control('speed').value = '3'; stall.control('speed').events.change();
+  stall.control('auto-play').checked = false; stall.control('auto-play').events.change();
+  stall.control('auto-next').checked = false; stall.control('auto-next').events.change();
+  stall.control('threshold').value = '80'; stall.control('threshold').events.change();
+  stall.state.now = 119999; await stall.tick(); assert.equal(stall.state.reloads.length, 0);
+  stall.state.now = 120000; await stall.tick(); assert.equal(stall.state.reloads.length, 1);
+  assert.equal(new URL(stall.state.reloads[0]).searchParams.get('courseWareId'), 'list-one');
+  assert.equal(new URL(stall.state.reloads[0]).searchParams.get('courseId'), 'test');
+  stall.state.now = 240000; await stall.tick(); assert.equal(stall.state.reloads.length, 1);
+  const restored = setup('/e-training/quality/courselearn', stall.storage);
+  restored.context.location.href = stall.state.reloads[0]; restored.state.now = 120000;
+  restored.video.duration = 1000; restored.state.taskDuration = 1000; restored.run(); await restored.tick();
+  assert.equal(restored.window.wanfangSpeed, 3); assert.equal(restored.window.wanfangAutoPlay, false);
+  assert.equal(restored.control('auto-next').checked, false); assert.equal(restored.control('threshold').value, '80');
+  assert.equal(restored.control('status').textContent, '● 跳转关闭'); assert.equal(restored.storage.size, 0);
+  restored.state.now = 240000; await restored.tick();
+  assert.equal(restored.state.reloads.length, 0); assert.equal(restored.control('auto-refresh').checked, false);
+  const healthyProgress = progressFixture(); await healthyProgress.tick();
+  for (const time of [60000, 120000, 180000, 240000]) {
+    healthyProgress.state.now = time; healthyProgress.state.learnDuration += 60; await healthyProgress.tick();
+  }
+  assert.equal(healthyProgress.state.reloads.length, 0);
+  const rounded = progressFixture(); rounded.state.taskDuration = 1000000; await rounded.tick();
+  assert.equal(rounded.control('progress-text').textContent, '0.0%');
+  rounded.state.now = 60000; rounded.state.learnDuration += 1; await rounded.tick();
+  assert.equal(rounded.control('progress-text').textContent, '0.0%');
+  rounded.state.now = 120000; await rounded.tick(); assert.equal(rounded.state.reloads.length, 0);
+  rounded.state.now = 180000; await rounded.tick(); assert.equal(rounded.state.reloads.length, 1);
+  for (const mode of ['paused', 'loading', 'seeking', 'ended', 'disabled', 'complete', 'unknown', 'quiz']) {
+    const fixture = progressFixture(); await fixture.tick();
+    if (mode === 'paused') {fixture.window.wanfangAutoPlay = false; fixture.video.paused = true;}
+    if (mode === 'loading') fixture.video.readyState = 2;
+    if (mode === 'seeking') fixture.video.seeking = true;
+    if (mode === 'ended') fixture.video.ended = true;
+    if (mode === 'disabled') {fixture.control('auto-refresh').checked = false; fixture.control('auto-refresh').events.change();}
+    if (mode === 'complete') fixture.state.learnDuration = fixture.state.taskDuration;
+    if (mode === 'unknown') fixture.state.learnDuration = null;
+    if (mode === 'quiz') fixture.state.title = '随堂测验';
+    fixture.state.now = 120000; await fixture.tick(); fixture.state.now = 240000; await fixture.tick();
+    assert.equal(fixture.state.reloads.length, 0, mode);
+  }
+  const interrupted = progressFixture(); interrupted.window.wanfangAutoPlay = false; await interrupted.tick();
+  interrupted.state.now = 60000; interrupted.video.paused = true; await interrupted.tick();
+  interrupted.state.now = 180000; interrupted.video.paused = false; await interrupted.tick();
+  interrupted.state.now = 299999; await interrupted.tick(); assert.equal(interrupted.state.reloads.length, 0);
+  interrupted.state.now = 300000; await interrupted.tick(); assert.equal(interrupted.state.reloads.length, 1);
+  const changedTask = progressFixture(); await changedTask.tick();
+  changedTask.state.now = 119999; changedTask.state.chapter = 'two'; changedTask.state.learnDuration = 0;
+  changedTask.video.currentSrc = 'two'; await changedTask.tick();
+  changedTask.state.now = 239998; await changedTask.tick(); assert.equal(changedTask.state.reloads.length, 0);
+  changedTask.state.now = 239999; await changedTask.tick(); assert.equal(changedTask.state.reloads.length, 1);
+  const timedText = progressFixture(); timedText.state.taskDuration = undefined;
+  timedText.state.taskDurationText = '01:00:00'; timedText.state.learnDuration = 900; await timedText.tick();
+  assert.equal(timedText.control('progress-text').textContent, '25.0%');
+  assert.equal(timedText.control('task-time').textContent, '累计观看 15:00 / 1:00:00');
+  timedText.state.taskDurationText = 'bad'; await timedText.tick(); assert.equal(timedText.control('progress-text').textContent, '—');
+  const blockedStorage = progressFixture(); blockedStorage.context.sessionStorage.setItem = () => {throw Error('storage blocked');};
+  await blockedStorage.tick(); blockedStorage.state.now = 120000; await blockedStorage.tick();
+  assert.equal(blockedStorage.state.reloads.length, 0); assert.equal(blockedStorage.window.wanfangAutoRefresh, false);
+  const legacyId = progressFixture();
+  Object.defineProperty(legacyId.course, 'activeList', {get() {return {listResourceCode: 'one', courseWareId: 'ware-one',
+    durationSec: 1000, isLearned: {learnDuration: 20}};}});
+  await legacyId.tick(); legacyId.state.now = 120000; await legacyId.tick();
+  assert.equal(new URL(legacyId.state.reloads[0]).searchParams.get('courseListId'), 'ware-one');
+  assert.equal(new URL(legacyId.state.reloads[0]).searchParams.has('courseWareId'), false);
+  const malformed = setup(); malformed.storage.set('wanfang-course-helper:auto-refresh', '{bad json');
+  malformed.run(); await malformed.tick(); assert.equal(malformed.window.wanfangSpeed, 1);
   for (const route of ['/e-training', '/e-training/', '/e-training/lecture/courselearn', '/e-training/quality/courselearn', '/e-training/activity']) {
     const page = setup(route); page.state.rootPresent = false; page.run(); await page.tick();
     assert.equal(page.hosts.length, 1, route); assert.equal(page.state.plays, 0);
@@ -276,6 +360,6 @@ async function main() {
     const other = setup(route); other.run(); assert.equal(other.timers.size, 0);
     assert.equal(Object.hasOwn(other.document, 'visibilityState'), false);
   }
-  console.log('PASS: native timing recovery across automatic/manual chapters, no stale-media or paused counting, no timer duplication, cleanup restores handlers, unavailable/failed timing stops auto-next; prior playback, settings and navigation checks. Real course E2E untested.');
+  console.log('PASS: task duration display, raw-second stall detection at 120s, growth/reset/exclusion cases, current-chapter refresh and settings recovery, repeat-refresh prevention, storage failure; native timing recovery and prior playback/settings checks. Real course E2E untested.');
 }
 main().catch(error => {console.error(error); process.exitCode = 1;});

@@ -1,14 +1,14 @@
 // ==UserScript==
 // @name         万方课程后台播放、倍速与自动下一节
 // @namespace    local.wanfang.background
-// @version      1.6.1
+// @version      1.7.0
 // @author       aurooooooo
 // @license      MIT
 // @homepageURL  https://github.com/aurooooooo/wanfang-course-helper
 // @supportURL   https://github.com/aurooooooo/wanfang-course-helper/issues
 // @downloadURL  https://raw.githubusercontent.com/aurooooooo/wanfang-course-helper/main/wanfang-background.user.js
 // @updateURL    https://raw.githubusercontent.com/aurooooooo/wanfang-course-helper/main/wanfang-background.user.js
-// @description  培训站点悬浮面板、课程后台播放、倍速、可关闭的自动播放和自动切换
+// @description  任务时长进度、课程后台播放、倍速、自动下一节和任务停滞刷新
 // @match        https://cx.wanfangdata.com.cn/e-training
 // @match        https://cx.wanfangdata.com.cn/e-training/*
 // @run-at       document-end
@@ -31,18 +31,39 @@
     console.error('无法启用后台播放补丁。', error);
     return;
   }
-  let thresholdPercent = 95;
+  const refreshStateKey = 'wanfang-course-helper:auto-refresh';
+  let recovery = null;
+  try {
+    const saved = sessionStorage.getItem(refreshStateKey);
+    if (saved) {
+      sessionStorage.removeItem(refreshStateKey);
+      const value = JSON.parse(saved);
+      const age = Date.now() - value?.at;
+      if (value?.url === location.href && Number.isFinite(age) && age >= 0 && age < 600000) recovery = value;
+    }
+  } catch (error) { /* Storage can be unavailable; normal playback still works. */ }
+  const settings = recovery?.settings || {};
+  let thresholdPercent = Number.isInteger(settings.threshold) && settings.threshold >= 1 && settings.threshold <= 100
+    ? settings.threshold : 95;
   // 可在控制台输入 window.wanfangSpeed = 3（或4、1）改变倍速。
   window.wanfangSpeed ??= 1;
   window.wanfangAutoPlay ??= true;
+  window.wanfangAutoRefresh ??= true;
+  if (Number.isFinite(settings.speed) && settings.speed > 0) window.wanfangSpeed = settings.speed;
+  if (typeof settings.autoPlay === 'boolean') window.wanfangAutoPlay = settings.autoPlay;
+  if (typeof settings.autoRefresh === 'boolean') window.wanfangAutoRefresh = settings.autoRefresh;
   if (window.wanfangCourseHelperCleanup) window.wanfangCourseHelperCleanup();
   else window.wanfangAutoNextStop?.();
   document.getElementById('wanfang-course-helper')?.remove();
   let switchedKey = '';
   let pending = null;
   let rejectedSpeed = null;
-  let running = true;
+  let running = typeof settings.autoNext === 'boolean' ? settings.autoNext : true;
   let disposed = false;
+  let stalledTask = null;
+  let refreshIssued = false;
+  let refreshAttempt = typeof recovery?.key === 'string' && Number.isFinite(recovery.learned) && recovery.learned >= 0
+    ? {key: recovery.key, learned: recovery.learned} : null;
   const playAttempts = new WeakMap();
   const coursePatches = new Map();
 
@@ -80,16 +101,19 @@
       <header id="drag-handle" tabindex="0" role="button" aria-label="移动课程助手面板，可拖动或用方向键移动" title="拖动移动 · 方向键微调"><strong>课程助手</strong><span id="status" role="status">● 运行中</span></header>
       <div class="body">
         <p class="caption">当前课程</p><p id="chapter">进入视频课程后自动识别</p>
-        <div class="metrics"><div><p class="caption">播放进度</p><span id="progress-text">—</span></div><p id="detail">等待课程播放器</p></div>
-        <progress id="progress-bar" max="100" value="0" aria-label="视频播放进度"></progress>
+        <div class="metrics"><div><p class="caption">任务进度</p><span id="progress-text">—</span></div><p id="detail">等待课程播放器</p></div>
+        <progress id="progress-bar" max="100" value="0" aria-label="当前课件累计观看时长进度"></progress>
+        <p id="task-time" class="hint">等待平台累计观看时长</p>
       </div>
       <details><summary>设置</summary>
         <label class="setting" for="speed"><span>播放倍速</span><select id="speed"></select></label>
         <label class="setting"><span>暂停时自动播放</span><input id="auto-play" type="checkbox"></label>
         <label class="setting"><span>自动跳转下一节</span><input id="auto-next" type="checkbox"></label>
         <label class="setting" for="threshold"><span>跳转进度</span><span class="percent-input"><input id="threshold" type="number" min="1" max="100" step="1" value="95" aria-describedby="threshold-hint threshold-error"><span>%</span></span></label>
-        <p id="threshold-hint" class="hint">1–100%，达到后进入下一节。关闭自动跳转后不生效。</p>
+        <p id="threshold-hint" class="hint">按视频播放进度跳转，范围 1–100%，与任务累计时长独立。</p>
         <p id="threshold-error" class="hint" role="alert"></p>
+        <label class="setting"><span>任务停滞时刷新</span><input id="auto-refresh" type="checkbox"></label>
+        <p class="hint">播放中累计时长连续 2 分钟未增长时刷新；暂停、加载和时长已满时不触发。</p>
         <p class="hint">首次播放受限时，请手动播放一次。倍速不会增加累计观看时长。</p>
       </details>
       <details><summary id="log-label">日志（0）</summary><pre id="logs" aria-label="脚本运行日志"></pre></details>
@@ -113,14 +137,92 @@
     logs.scrollTop = logs.scrollHeight;
     panel.getElementById('log-label').textContent = `日志（${logLines.length}）`;
   }
-  function showDetail(message, title = '', video = null) {
+  function showDetail(message, title = '', task = null) {
     panel.getElementById('detail').textContent = message;
     const chapter = panel.getElementById('chapter');
     chapter.textContent = title || '进入视频课程后自动识别';
     chapter.title = title;
-    const progress = video ? Math.max(0, Math.min(100, video.currentTime / video.duration * 100)) : null;
-    panel.getElementById('progress-text').textContent = progress === null ? '—' : `${progress.toFixed(1)}%`;
-    panel.getElementById('progress-bar').value = progress ?? 0;
+    panel.getElementById('progress-text').textContent = task ? `${task.percent.toFixed(1)}%` : '—';
+    panel.getElementById('progress-bar').value = task?.percent ?? 0;
+    panel.getElementById('task-time').textContent = task
+      ? `累计观看 ${formatDuration(task.learned)} / ${formatDuration(task.total)}` : '等待平台累计观看时长';
+  }
+  function formatDuration(seconds) {
+    const value = Math.floor(seconds);
+    const hours = Math.floor(value / 3600);
+    const minutes = Math.floor(value % 3600 / 60).toString().padStart(2, '0');
+    const rest = (value % 60).toString().padStart(2, '0');
+    return hours ? `${hours}:${minutes}:${rest}` : `${minutes}:${rest}`;
+  }
+  function readTaskProgress(patch) {
+    const active = patch?.course.activeList;
+    const raw = active?.isLearned?.learnDuration;
+    if (raw === null || raw === undefined || raw === '') return null;
+    const learned = Number(raw);
+    let total = Number(active.durationSec);
+    if ((!Number.isFinite(total) || total <= 0) && typeof active.duration === 'string') {
+      const parts = active.duration.split(':').map(Number);
+      if (/^\d+(?::\d+(?:\.\d+)?){0,2}$/.test(active.duration) && parts.every(Number.isFinite))
+        total = parts.reduce((seconds, part) => seconds * 60 + part, 0);
+    }
+    if (!Number.isFinite(learned) || learned < 0 || !Number.isFinite(total) || total <= 0) return null;
+    return {learned, total, percent: Math.min(100, learned / total * 100), active,
+      key: `${location.pathname}|${patch.course.resourceId || ''}|${active.courseListId || active.courseWareId || active.listResourceCode}`};
+  }
+  function checkTaskStall(task, video, switching) {
+    if (refreshIssued) return true;
+    if (task && refreshAttempt && (refreshAttempt.key !== task.key || task.learned > refreshAttempt.learned))
+      refreshAttempt = null;
+    if (!window.wanfangAutoRefresh || !task || switching || video.paused || video.ended || video.seeking ||
+        video.readyState < 3 || task.learned >= task.total) {
+      stalledTask = null;
+      return false;
+    }
+    const now = Date.now();
+    if (!stalledTask || stalledTask.key !== task.key || task.learned < stalledTask.learned) {
+      stalledTask = {key: task.key, learned: task.learned, at: now};
+      return false;
+    }
+    if (task.learned > stalledTask.learned) {
+      refreshAttempt = null;
+      stalledTask.learned = task.learned;
+      stalledTask.at = now;
+      return false;
+    }
+    if (now - stalledTask.at < 120000) return false;
+    if (refreshAttempt?.key === task.key) {
+      window.wanfangAutoRefresh = false;
+      autoRefreshCheckbox.checked = false;
+      stalledTask = null;
+      log('warn', '自动刷新后任务时长仍未增长，已停止连续刷新，请检查课程和网络。');
+      return false;
+    }
+    log('warn', '任务累计时长连续 2 分钟未增长，正在刷新当前课件。');
+    try {
+      const url = new URL(location.href);
+      // The site's query names are reversed: courseWareId selects courseListId.
+      if (task.active.courseListId) {
+        url.searchParams.delete('courseListId');
+        url.searchParams.set('courseWareId', task.active.courseListId);
+      } else if (task.active.courseWareId) {
+        url.searchParams.delete('courseWareId');
+        url.searchParams.set('courseListId', task.active.courseWareId);
+      } else throw new Error('Current courseware ID unavailable');
+      sessionStorage.setItem(refreshStateKey, JSON.stringify({url: url.href, at: now, key: task.key,
+        learned: task.learned, settings: {speed: Number(window.wanfangSpeed), autoPlay: Boolean(window.wanfangAutoPlay),
+          autoNext: running, threshold: thresholdPercent, autoRefresh: Boolean(window.wanfangAutoRefresh)}}));
+      refreshIssued = true;
+      if (url.href === location.href) location.reload();
+      else location.replace(url.href);
+      return true;
+    } catch (error) {
+      try { sessionStorage.removeItem(refreshStateKey); } catch (storageError) { /* No recovery data available. */ }
+      refreshIssued = false;
+      window.wanfangAutoRefresh = false;
+      autoRefreshCheckbox.checked = false;
+      log('warn', '无法保存刷新信息或定位当前课件，已关闭自动刷新，请手动刷新。');
+      return false;
+    }
   }
   function patchCourseTimer(root) {
     if (!root) return null;
@@ -238,6 +340,10 @@
   });
   const autoNextCheckbox = panel.getElementById('auto-next');
   autoNextCheckbox.checked = running;
+  if (!running) {
+    panel.getElementById('status').textContent = '● 跳转关闭';
+    panel.getElementById('status').setAttribute('data-stopped', '');
+  }
   autoNextCheckbox.addEventListener('change', () => {
     if (!autoNextCheckbox.checked) window.wanfangAutoNextStop();
     else {
@@ -260,6 +366,13 @@
     panel.getElementById('threshold-error').textContent = '';
     thresholdPercent = value;
     log('info', `跳转进度设置为 ${thresholdPercent}%。`);
+  });
+  const autoRefreshCheckbox = panel.getElementById('auto-refresh');
+  autoRefreshCheckbox.checked = Boolean(window.wanfangAutoRefresh);
+  autoRefreshCheckbox.addEventListener('change', () => {
+    window.wanfangAutoRefresh = autoRefreshCheckbox.checked;
+    stalledTask = null;
+    log('info', `任务停滞时刷新：${window.wanfangAutoRefresh ? '已开启' : '已关闭'}。`);
   });
   const dragHandle = panel.getElementById('drag-handle');
   let drag = null;
@@ -303,22 +416,27 @@
     const coursePatch = patchCourseTimer(root);
     const title = root?.querySelector('h1')?.textContent.trim() || '';
     if (title.includes('随堂测验')) {
+      stalledTask = null;
       window.wanfangAutoNextStop('已进入测验。完成后可在设置中重新开启自动跳转。');
       showDetail('请手动完成测验', title);
       return;
     }
     if (pending && Date.now() - pending.at > 20000) {
+      stalledTask = null;
       window.wanfangAutoNextStop('下一节加载超时，请检查课程后在设置中重新开启自动跳转。');
       return;
     }
     const video = root?.querySelector('video');
     if (!video || !Number.isFinite(video.duration) || video.duration <= 0) {
+      stalledTask = null;
       showDetail('等待课程播放器', title);
       return;
     }
     applySpeed(video);
     resumeCourseTimer(coursePatch, video);
-    showDetail(`${pending ? '切换中' : video.ended ? '已结束' : video.paused ? '已暂停' : '播放中'} · ${video.playbackRate}×`, title, video);
+    const task = readTaskProgress(coursePatch);
+    showDetail(`${pending ? '切换中' : video.ended ? '已结束' : video.paused ? '已暂停' : '播放中'} · ${video.playbackRate}×`, title, task);
+    if (checkTaskStall(task, video, Boolean(pending || coursePatch?.waiting))) return;
     const source = video.currentSrc || video.src;
     const key = `${location.href}|${title}|${source}`;
 
@@ -377,5 +495,7 @@
   };
   log('info', `课程助手已启动：${window.wanfangSpeed}×，播放达到 ${thresholdPercent}% 自动跳转；可在设置中调整。`);
   log('info', `暂停时自动播放：${window.wanfangAutoPlay ? '已开启' : '已关闭'}，可在设置中调整。`);
+  log('info', `任务进度读取平台累计观看时长；停滞自动刷新：${window.wanfangAutoRefresh ? '已开启' : '已关闭'}。`);
+  if (recovery) log('info', '已恢复自动刷新前的设置；等待平台重新加载当前课件。');
   log('warn', '倍速不会同步增加累计观看时长，提前切换可能无法满足时长要求。');
 })();
